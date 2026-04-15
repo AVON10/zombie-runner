@@ -1,0 +1,471 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Zombie Road Runner</title>
+    <style>
+        body {
+            margin: 0; padding: 0;
+            background: linear-gradient(to bottom, #2c3e50, #34495e);
+            display: flex; justify-content: center; align-items: center;
+            min-height: 100vh; font-family: 'Arial', sans-serif; overflow: hidden;
+        }
+        canvas { border: 3px solid #ecf0f1; box-shadow: 0 0 20px rgba(0,0,0,0.5); }
+        
+        .ui {
+            position: absolute; top: 20px; left: 20px; color: white;
+            font-size: 24px; font-weight: bold; text-shadow: 2px 2px 4px rgba(0,0,0,0.8);
+            z-index: 100;
+        }
+        .pause-btn {
+            position: absolute; top: 20px; right: 20px; font-size: 28px;
+            cursor: pointer; z-index: 100; color: white;
+        }
+        .menu {
+            position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+            background: rgba(0,0,0,0.95); color: white; padding: 30px; border-radius: 20px;
+            text-align: center; z-index: 300; width: 700px;
+        }
+        .character-grid {
+            display: grid; grid-template-columns: repeat(3, 1fr); gap: 15px; margin: 20px 0;
+        }
+        .character {
+            padding: 15px; border: 3px solid #34495e; border-radius: 15px;
+            cursor: pointer; transition: all 0.2s;
+        }
+        .character:hover { border-color: #f1c40f; transform: scale(1.08); }
+        .character.selected { border-color: #2ecc71; box-shadow: 0 0 20px #2ecc71; }
+        .restart-btn, .play-btn {
+            background: #e74c3c; color: white; border: none;
+            padding: 15px 30px; font-size: 18px; border-radius: 10px;
+            cursor: pointer; margin: 10px;
+        }
+        .play-btn { background: #2ecc71; }
+    </style>
+</head>
+<body>
+    <canvas id="gameCanvas" width="800" height="600"></canvas>
+    
+    <div class="ui" id="ingameUI">
+        <div>Score: <span id="score">0</span></div>
+        <div>Diamonds: <span id="diamonds">0</span></div>
+        <div>Best: <span id="highscore">0</span></div>
+    </div>
+    <div class="pause-btn" id="pauseBtn">⏸</div>
+
+    <!-- Character Selection Menu -->
+    <div class="menu" id="charMenu">
+        <h1>Choose Your Survivor</h1>
+        <div class="character-grid" id="characterGrid"></div>
+        <button class="play-btn" onclick="startGame()">START RUNNING!</button>
+    </div>
+
+    <div class="game-over" id="gameOver">
+        <h1>ZOMBIES CAUGHT YOU!</h1>
+        <p>Final Score: <span id="finalScore">0</span></p>
+        <p>Diamonds: <span id="finalDiamonds">0</span></p>
+        <p style="color:#f1c40f;">High Score: <span id="finalHigh">0</span></p>
+        <button class="restart-btn" onclick="showCharacterMenu()">CHANGE CHARACTER</button>
+        <button class="restart-btn" onclick="restartGame()" style="background:#3498db;">PLAY AGAIN</button>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+
+        let gameState = { score: 0, diamonds: 0, gameSpeed: 3, gameRunning: false, paused: false, scrollOffset: 0, shieldActive: false, shieldTimer: 0 };
+        let highScore = localStorage.getItem('zombieHighScore') || 0;
+        let selectedCharacter = localStorage.getItem('selectedCharacter') || 'runner';
+        let particles = [];
+
+        const characters = {
+            runner:   { name: "Runner",   color: "#3498db", head: "#2980b9", detail: "#fff" },
+            survivor: { name: "Survivor", color: "#27ae60", head: "#1e8449", detail: "#f1c40f" },
+            punk:     { name: "Punk",     color: "#e74c3c", head: "#c0392b", detail: "#2c3e50" },
+            scientist:{ name: "Scientist",color: "#9b59b6", head: "#8e44ad", detail: "#fff" },
+            cowboy:   { name: "Cowboy",   color: "#d35400", head: "#8e4400", detail: "#f1c40f" },
+            ninja:    { name: "Ninja",    color: "#2c3e50", head: "#1a252f", detail: "#e74c3c" }
+        };
+
+        const player = { 
+            x: 100, y: 400, width: 50, height: 80, 
+            vy: 0, grounded: false, jumpPower: -18,
+            runFrame: 0 
+        };
+
+        let obstacles = [], diamonds = [], buildings = [], zombies = [], powerups = [];
+        let keys = {};
+
+        document.addEventListener('keydown', e => keys[e.code] = true);
+        document.addEventListener('keyup', e => keys[e.code] = false);
+
+        canvas.addEventListener('touchstart', e => { e.preventDefault(); if (gameState.gameRunning && !gameState.paused && player.grounded) jump(); });
+        canvas.addEventListener('mousedown', () => { if (gameState.gameRunning && !gameState.paused && player.grounded) jump(); });
+
+        const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        let musicInterval = null;
+
+        function playSound(freq, duration, type = 'sine', volume = 0.3) {
+            const osc = audioCtx.createOscillator();
+            const gain = audioCtx.createGain();
+            osc.type = type; osc.frequency.value = freq;
+            gain.gain.value = volume;
+            osc.connect(gain).connect(audioCtx.destination);
+            osc.start(); osc.stop(audioCtx.currentTime + duration);
+        }
+
+        function startMusic() {
+            if (musicInterval) return;
+            let note = 0;
+            const melody = [220, 262, 330, 392, 330, 262, 220, 196];
+            musicInterval = setInterval(() => {
+                if (!gameState.gameRunning || gameState.paused) return;
+                playSound(melody[note % melody.length], 0.12, 'square', 0.15);
+                note++;
+            }, 180);
+        }
+
+        function stopMusic() { if (musicInterval) clearInterval(musicInterval); musicInterval = null; }
+
+        function jump() {
+            if (player.grounded) {
+                player.vy = player.jumpPower;
+                player.grounded = false;
+                playSound(600, 0.1, 'square', 0.4);
+                playSound(800, 0.15, 'sine', 0.3);
+                for (let i = 0; i < 8; i++) {
+                    particles.push({ x: player.x + 20, y: player.y + player.height, vx: (Math.random()-0.5)*3, vy: Math.random()*2+1, life: 25, color: '#f1c40f' });
+                }
+            }
+        }
+
+        function createCharacterGrid() {
+            const grid = document.getElementById('characterGrid');
+            grid.innerHTML = '';
+            Object.keys(characters).forEach(key => {
+                const char = characters[key];
+                const div = document.createElement('div');
+                div.className = `character ${key === selectedCharacter ? 'selected' : ''}`;
+                div.innerHTML = `
+                    <div style="height:120px; background:#34495e; border-radius:10px; position:relative; overflow:hidden;">
+                        <div style="position:absolute; bottom:10px; left:25px; width:50px; height:80px; background:${char.color};"></div>
+                    </div>
+                    <strong>${char.name}</strong>
+                `;
+                div.onclick = () => {
+                    selectedCharacter = key;
+                    localStorage.setItem('selectedCharacter', key);
+                    createCharacterGrid();
+                };
+                grid.appendChild(div);
+            });
+        }
+
+        function showCharacterMenu() {
+            gameState.gameRunning = false;
+            document.getElementById('charMenu').style.display = 'block';
+            document.getElementById('ingameUI').style.display = 'none';
+            document.getElementById('gameOver').style.display = 'none';
+            createCharacterGrid();
+        }
+
+        function startGame() {
+            document.getElementById('charMenu').style.display = 'none';
+            document.getElementById('ingameUI').style.display = 'block';
+            gameState.gameRunning = true;
+            restartGame(true);
+        }
+
+        const obstacleTypes = [
+            { name: 'stopCone', width: 30, height: 50, color: '#e74c3c' },
+            { name: 'garbage', width: 40, height: 40, color: '#95a5a6' },
+            { name: 'car', width: 80, height: 50, color: '#7f8c8d' }
+        ];
+
+        function initBuildings() {
+            buildings = [];
+            for (let i = 0; i < 10; i++) {
+                buildings.push({ x: i * 200 + Math.random()*100, y: 250, width: 120 + Math.random()*60, height: 200 + Math.random()*100, color: '#2c3e50' });
+            }
+        }
+
+        function spawnObstacle() { 
+            const type = obstacleTypes[Math.floor(Math.random() * obstacleTypes.length)];
+            obstacles.push({ x: canvas.width, y: 480 - type.height, ...type });
+        }
+        function spawnDiamond() { diamonds.push({ x: canvas.width, y: 300 + Math.random()*150, width: 20, height: 20 }); }
+        function spawnZombies() {
+            for (let i = 0; i < 3; i++) {
+                zombies.push({ x: canvas.width + i*50, y: 450, width: 40, height: 60, color: '#27ae60', alpha: 0.9, bob: 0 });
+            }
+        }
+        function spawnPowerup() {
+            powerups.push({ x: canvas.width, y: 280 + Math.random()*120, width: 28, height: 28 });
+        }
+
+        function checkCollision(a, b) {
+            return a.x < b.x + b.width && a.x + a.width > b.x && a.y < b.y + b.height && a.y + a.height > b.y;
+        }
+
+        function update() {
+            if (!gameState.gameRunning || gameState.paused) return;
+
+            if (keys['Space']) { if (player.grounded) jump(); keys['Space'] = false; }
+
+            player.vy += 0.8;
+            player.y += player.vy;
+            if (player.y + player.height > 480) {
+                player.y = 480 - player.height;
+                player.vy = 0;
+                player.grounded = true;
+            }
+
+            // Running animation frame
+            if (player.grounded) {
+                player.runFrame += 0.25 + gameState.gameSpeed * 0.08;
+            }
+
+            gameState.gameSpeed += 0.001;
+            gameState.score += gameState.gameSpeed;
+            gameState.scrollOffset += gameState.gameSpeed;
+
+            if (gameState.shieldActive) gameState.shieldTimer--;
+
+            if (Math.random() < 0.022 + gameState.gameSpeed * 0.001) spawnObstacle();
+            if (Math.random() < 0.018) spawnDiamond();
+            if (Math.random() < 0.006) spawnZombies();
+            if (Math.random() < 0.003) spawnPowerup();
+
+            // Update objects...
+            for (let i = obstacles.length-1; i >= 0; i--) {
+                obstacles[i].x -= gameState.gameSpeed;
+                if (obstacles[i].x + obstacles[i].width < 0) obstacles.splice(i,1);
+                else if (checkCollision(player, obstacles[i])) {
+                    if (gameState.shieldActive) { gameState.shieldActive = false; obstacles.splice(i,1); }
+                    else gameOver();
+                }
+            }
+
+            for (let i = diamonds.length-1; i >= 0; i--) {
+                diamonds[i].x -= gameState.gameSpeed;
+                if (diamonds[i].x + diamonds[i].width < 0) diamonds.splice(i,1);
+                else if (checkCollision(player, diamonds[i])) {
+                    gameState.diamonds++;
+                    playSound(1200, 0.08); playSound(1500, 0.15);
+                    for (let k = 0; k < 14; k++) particles.push({ x: diamonds[i].x+10, y: diamonds[i].y+10, vx: (Math.random()-0.5)*6, vy: (Math.random()-0.5)*6, life: 30, color: '#f1c40f' });
+                    diamonds.splice(i,1);
+                }
+            }
+
+            for (let i = zombies.length-1; i >= 0; i--) {
+                zombies[i].x -= gameState.gameSpeed * 1.25;
+                zombies[i].bob = Math.sin(gameState.scrollOffset * 0.2) * 4;
+                if (zombies[i].x + zombies[i].width < 0) zombies.splice(i,1);
+                else if (checkCollision(player, zombies[i])) {
+                    if (gameState.shieldActive) { gameState.shieldActive = false; zombies.splice(i,1); }
+                    else gameOver();
+                }
+            }
+
+            for (let i = powerups.length-1; i >= 0; i--) {
+                powerups[i].x -= gameState.gameSpeed;
+                if (powerups[i].x + powerups[i].width < 0) powerups.splice(i,1);
+                else if (checkCollision(player, powerups[i])) {
+                    gameState.shieldActive = true;
+                    gameState.shieldTimer = 480;
+                    playSound(800, 0.2); playSound(1200, 0.3);
+                    powerups.splice(i,1);
+                }
+            }
+
+            buildings.forEach(b => {
+                b.x -= gameState.gameSpeed * 0.3;
+                if (b.x + b.width < 0) b.x = canvas.width + Math.random()*250;
+            });
+
+            for (let i = particles.length-1; i >= 0; i--) {
+                particles[i].x += particles[i].vx;
+                particles[i].y += particles[i].vy;
+                particles[i].vy += 0.2;
+                particles[i].life--;
+                if (particles[i].life <= 0) particles.splice(i,1);
+            }
+
+            document.getElementById('score').textContent = Math.floor(gameState.score);
+            document.getElementById('diamonds').textContent = gameState.diamonds;
+            document.getElementById('highscore').textContent = highScore;
+        }
+
+        function render() {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            // Road
+            ctx.fillStyle = '#34495e';
+            ctx.fillRect(0, 480, canvas.width, 120);
+            ctx.fillStyle = '#f1c40f';
+            for (let i = 0; i < canvas.width + 100; i += 100) {
+                ctx.fillRect(((i + gameState.scrollOffset) % 220) - 20, 515, 45, 10);
+            }
+
+            // Buildings
+            buildings.forEach(b => {
+                ctx.fillStyle = b.color;
+                ctx.fillRect(b.x, b.y, b.width, b.height);
+                ctx.fillStyle = '#1a252f';
+                ctx.fillRect(b.x+20, b.y+30, 25, 25);
+                ctx.fillRect(b.x+b.width-45, b.y+30, 25, 25);
+            });
+
+            const char = characters[selectedCharacter];
+            const frame = Math.floor(player.runFrame) % 4;
+            const isJumping = !player.grounded;
+
+            // Body
+            ctx.fillStyle = char.color;
+            ctx.fillRect(player.x + 10, player.y + 25, 30, 40); // torso
+
+            // Head
+            ctx.fillStyle = char.head;
+            const headBob = isJumping ? 0 : Math.sin(player.runFrame * 0.8) * 2;
+            ctx.fillRect(player.x + 15, player.y + 12 + headBob, 25, 22);
+
+            // Eyes
+            ctx.fillStyle = char.detail;
+            ctx.fillRect(player.x + 20, player.y + 18 + headBob, 5, 6);
+            ctx.fillRect(player.x + 30, player.y + 18 + headBob, 5, 6);
+
+            // Legs
+            ctx.fillStyle = '#2c3e50';
+            if (isJumping) {
+                // Jumping pose
+                ctx.fillRect(player.x + 15, player.y + 55, 8, 25); // left leg
+                ctx.fillRect(player.x + 30, player.y + 55, 8, 20); // right leg
+            } else {
+                // Running animation
+                const legSwing = Math.sin(player.runFrame * 1.2) * 12;
+                ctx.fillRect(player.x + 15, player.y + 55, 8, 25 + legSwing);
+                ctx.fillRect(player.x + 30, player.y + 55, 8, 25 - legSwing);
+            }
+
+            // Arms
+            ctx.fillStyle = char.head;
+            if (isJumping) {
+                ctx.fillRect(player.x + 8, player.y + 32, 8, 18);
+                ctx.fillRect(player.x + 38, player.y + 35, 8, 15);
+            } else {
+                const armSwing = Math.sin(player.runFrame * 1.2) * 10;
+                ctx.fillRect(player.x + 8, player.y + 30 + armSwing, 8, 18);
+                ctx.fillRect(player.x + 38, player.y + 30 - armSwing, 8, 18);
+            }
+
+            // Special costume details
+            if (selectedCharacter === 'cowboy') {
+                ctx.fillStyle = '#f1c40f';
+                ctx.fillRect(player.x + 12, player.y + 8 + headBob, 30, 8); // hat
+            } else if (selectedCharacter === 'ninja') {
+                ctx.fillStyle = '#e74c3c';
+                ctx.fillRect(player.x + 15, player.y + 35, 20, 8); // belt
+            } else if (selectedCharacter === 'punk') {
+                ctx.fillStyle = '#2c3e50';
+                ctx.fillRect(player.x + 10, player.y + 28, 30, 10); // jacket
+            }
+
+            // Shield
+            if (gameState.shieldActive) {
+                ctx.save();
+                ctx.globalAlpha = 0.4 + Math.sin(gameState.scrollOffset * 0.3) * 0.2;
+                ctx.strokeStyle = '#2ecc71';
+                ctx.lineWidth = 6;
+                ctx.beginPath();
+                ctx.arc(player.x + 25, player.y + 40, 42, 0, Math.PI * 2);
+                ctx.stroke();
+                ctx.restore();
+            }
+
+            // Other objects (same as before)
+            obstacles.forEach(o => { ctx.fillStyle = o.color; ctx.fillRect(o.x, o.y, o.width, o.height); });
+
+            diamonds.forEach(d => {
+                ctx.save();
+                ctx.translate(d.x+10, d.y+10);
+                ctx.rotate(gameState.scrollOffset * 0.15);
+                ctx.fillStyle = '#f1c40f';
+                ctx.beginPath(); ctx.moveTo(0,-10); ctx.lineTo(10,0); ctx.lineTo(0,10); ctx.lineTo(-10,0); ctx.closePath();
+                ctx.fill(); ctx.restore();
+            });
+
+            powerups.forEach(p => {
+                ctx.save();
+                ctx.translate(p.x + 14, p.y + 14);
+                ctx.rotate(gameState.scrollOffset * 0.2);
+                ctx.fillStyle = '#2ecc71';
+                ctx.fillRect(-10, -10, 20, 20);
+                ctx.fillStyle = 'white';
+                ctx.font = 'bold 18px Arial';
+                ctx.textAlign = 'center';
+                ctx.fillText('🛡️', 0, 6);
+                ctx.restore();
+            });
+
+            zombies.forEach(z => {
+                ctx.globalAlpha = z.alpha;
+                ctx.fillStyle = z.color;
+                ctx.fillRect(z.x, z.y + z.bob, z.width, z.height);
+                ctx.fillStyle = 'red';
+                ctx.fillRect(z.x+6, z.y + 12 + z.bob, 9, 9);
+                ctx.fillRect(z.x+25, z.y + 12 + z.bob, 9, 9);
+                ctx.globalAlpha = 1;
+            });
+
+            particles.forEach(p => {
+                ctx.globalAlpha = p.life / 30;
+                ctx.fillStyle = p.color;
+                ctx.fillRect(p.x, p.y, 4, 4);
+                ctx.globalAlpha = 1;
+            });
+        }
+
+        function gameOver() {
+            gameState.gameRunning = false;
+            stopMusic();
+            playSound(200, 0.8, 'sawtooth', 0.6);
+            if (gameState.score > highScore) {
+                highScore = Math.floor(gameState.score);
+                localStorage.setItem('zombieHighScore', highScore);
+            }
+            document.getElementById('finalScore').textContent = Math.floor(gameState.score);
+            document.getElementById('finalDiamonds').textContent = gameState.diamonds;
+            document.getElementById('finalHigh').textContent = highScore;
+            document.getElementById('gameOver').style.display = 'block';
+        }
+
+        function restartGame(fromMenu = false) {
+            stopMusic();
+            gameState = { score: 0, diamonds: 0, gameSpeed: 3, gameRunning: true, paused: false, scrollOffset: 0, shieldActive: false, shieldTimer: 0 };
+            player.y = 400; player.vy = 0; player.grounded = false; player.runFrame = 0;
+            obstacles = []; diamonds = []; zombies = []; powerups = []; particles = [];
+            initBuildings();
+            document.getElementById('gameOver').style.display = 'none';
+            if (!fromMenu) startMusic();
+        }
+
+        document.getElementById('pauseBtn').addEventListener('click', () => {
+            gameState.paused = !gameState.paused;
+            document.getElementById('pauseBtn').textContent = gameState.paused ? '▶' : '⏸';
+            if (gameState.paused) stopMusic();
+            else if (gameState.gameRunning) startMusic();
+        });
+
+        function gameLoop() {
+            update();
+            render();
+            requestAnimationFrame(gameLoop);
+        }
+
+        initBuildings();
+        showCharacterMenu();
+        gameLoop();
+    </script>
+</body>
+</html>
